@@ -249,6 +249,24 @@ export const refunds = sqliteTable(
       .$defaultFn(() => new Date().toISOString()),
     resolvedAt: text("resolved_at"),
     resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    // The platform admin's optional explanation, set only when declined.
+    declineNote: text("decline_note"),
+    // Frozen when a refund is approved, because approval deletes the learner's
+    // course progress. Null on refunds that were not approved. "At request"
+    // figures count what existed when the learner asked; "since request"
+    // figures count what they did afterwards.
+    progressLessonsCompleted: integer("progress_lessons_completed"),
+    progressLessonsTotal: integer("progress_lessons_total"),
+    progressSecondsWatched: integer("progress_seconds_watched"),
+    progressLessonsCompletedSinceRequest: integer(
+      "progress_lessons_completed_since_request"
+    ),
+    progressSecondsWatchedSinceRequest: integer(
+      "progress_seconds_watched_since_request"
+    ),
+    progressQuizAttemptsSinceRequest: integer(
+      "progress_quiz_attempts_since_request"
+    ),
   },
   (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
 );

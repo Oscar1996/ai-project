@@ -6,24 +6,22 @@ import { db } from "~/db";
 import {
   courses,
   coupons,
-  lessonProgress,
-  lessons,
-  modules,
   purchases,
   refunds,
   users,
-  videoWatchEvents,
   RefundStatus,
-  LessonProgressStatus,
 } from "~/db/schema";
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
-import { getDiscountForCountry } from "~/lib/ppp";
 import { formatPrice } from "~/lib/utils";
 
-const REFUND_WINDOW_DAYS = 14;
-const MAX_WATCHED_HOURS = 2;
-const MAX_COMPLETED_LESSON_SHARE = 0.5;
+import {
+  MAX_COMPLETED_LESSON_SHARE,
+  MAX_WATCHED_SECONDS,
+  REFUND_WINDOW_DAYS,
+  isInsideRefundWindow,
+} from "~/lib/refund-policy";
+import { measureProgress } from "~/lib/refund-review.server";
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
@@ -50,17 +48,6 @@ function getLatestPurchase(userId: number, courseId: number) {
     .get();
 }
 
-function getLessonIdsForCourse(courseId: number): number[] {
-  const rows = db
-    .select({ id: lessons.id })
-    .from(lessons)
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .where(eq(modules.courseId, courseId))
-    .all();
-
-  return rows.map((row) => row.id);
-}
-
 function getOpenRefund(purchaseId: number) {
   return db
     .select()
@@ -72,20 +59,6 @@ function getOpenRefund(purchaseId: number) {
       )
     )
     .get();
-}
-
-// The fourteen-day window is counted in whole days, not hours — someone who
-// buys at 23:00 should still get the whole of their fourteenth day.
-function calendarDay(when: Date): string {
-  const month = String(when.getMonth() + 1).padStart(2, "0");
-  const day = String(when.getDate()).padStart(2, "0");
-  return `${when.getFullYear()}-${month}-${day}`;
-}
-
-function lastDayOfWindow(purchasedAtIso: string): string {
-  const deadline = new Date(purchasedAtIso);
-  deadline.setDate(deadline.getDate() + REFUND_WINDOW_DAYS);
-  return calendarDay(deadline);
 }
 
 /**
@@ -164,71 +137,33 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("A claimed team seat cannot be refunded.", { status: 403 });
   }
 
-  const today = calendarDay(new Date());
-  const withinRefundWindow = today <= lastDayOfWindow(purchase.createdAt);
-
-  if (!withinRefundWindow) {
+  if (!isInsideRefundWindow(purchase.createdAt)) {
     throw data(`The ${REFUND_WINDOW_DAYS}-day window has closed.`, {
       status: 403,
     });
   }
 
-  const courseLessonIds = getLessonIdsForCourse(course.id);
+  const progress = measureProgress(db, currentUserId, course.id);
 
-  if (courseLessonIds.length > 0) {
-    const completed = db
-      .select({ count: sql<number>`count(*)` })
-      .from(lessonProgress)
-      .where(
-        and(
-          eq(lessonProgress.userId, currentUserId),
-          eq(lessonProgress.status, LessonProgressStatus.Completed),
-          inArray(lessonProgress.lessonId, courseLessonIds)
-        )
-      )
-      .get();
-
-    const completedShare = (completed?.count ?? 0) / courseLessonIds.length;
-    if (completedShare >= MAX_COMPLETED_LESSON_SHARE) {
-      throw data(
-        "You have completed too much of this course to get a refund.",
-        { status: 403 }
-      );
-    }
+  if (
+    progress.lessonsTotal > 0 &&
+    progress.lessonsCompleted / progress.lessonsTotal >=
+      MAX_COMPLETED_LESSON_SHARE
+  ) {
+    throw data("You have completed too much of this course to get a refund.", {
+      status: 403,
+    });
   }
 
-  let watchedSeconds = 0;
-  if (courseLessonIds.length > 0) {
-    const furthestPerLesson = db
-      .select({
-        furthest: sql<number>`max(${videoWatchEvents.positionSeconds})`,
-      })
-      .from(videoWatchEvents)
-      .where(
-        and(
-          eq(videoWatchEvents.userId, currentUserId),
-          inArray(videoWatchEvents.lessonId, courseLessonIds)
-        )
-      )
-      .groupBy(videoWatchEvents.lessonId)
-      .all();
-
-    watchedSeconds = furthestPerLesson.reduce(
-      (total, row) => total + row.furthest,
-      0
-    );
-  }
-
-  if (watchedSeconds >= MAX_WATCHED_HOURS * 60 * 60) {
+  if (progress.secondsWatched >= MAX_WATCHED_SECONDS) {
     throw data("You have watched too much of this course to get a refund.", {
       status: 403,
     });
   }
 
-  // A purchase made at a purchasing-power price is given back at that price,
-  // not at the list price of the course.
-  const pppDiscount = getDiscountForCountry(purchase.country);
-  const refundableAmount = pppDiscount > 0 ? purchase.amountPaid : course.price;
+  // The refund returns what the learner actually paid, including a regional
+  // discount price, never the course's list price.
+  const refundableAmount = purchase.amountPaid;
 
   const formData = await request.formData();
   const parsed = parseFormData(formData, refundActionSchema);

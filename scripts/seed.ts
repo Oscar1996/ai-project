@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -2277,6 +2277,35 @@ This course is still in draft while the cluster examples are rewritten against t
     .run();
 
   console.log(`Created ${countRows(schema.purchases)} individual purchases.`);
+
+  // ─── Refund requests ───
+  // Two open requests for the platform admin's review screen: Sophia at the
+  // list price, and James, who paid a regional discount price.
+  for (const [studentId, reason, requestedDaysAgo] of [
+    [students[4].id, "The course is not at the level I was hoping for.", 3],
+    [students[1].id, "I bought this by mistake and have barely started.", 1],
+  ] as const) {
+    const purchase = db
+      .select()
+      .from(schema.purchases)
+      .where(
+        and(
+          eq(schema.purchases.userId, studentId),
+          eq(schema.purchases.courseId, course1.id)
+        )
+      )
+      .get();
+
+    if (purchase) {
+      db.insert(schema.refunds)
+        .values({
+          purchaseId: purchase.id,
+          reason,
+          requestedAt: daysAgo(requestedDaysAgo),
+        })
+        .run();
+    }
+  }
 
   // ─── Teams, Team Members, and Coupons ───
   // Bossy McBossface bought 5 team seats for course 2; Olivia and Liam redeemed coupons
