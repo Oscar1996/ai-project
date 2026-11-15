@@ -6,6 +6,7 @@ import { db } from "~/db";
 import {
   courses,
   coupons,
+  lessonProgress,
   lessons,
   modules,
   purchases,
@@ -13,6 +14,7 @@ import {
   users,
   videoWatchEvents,
   RefundStatus,
+  LessonProgressStatus,
 } from "~/db/schema";
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
@@ -21,6 +23,7 @@ import { formatPrice } from "~/lib/utils";
 
 const REFUND_WINDOW_DAYS = 14;
 const MAX_WATCHED_HOURS = 2;
+const MAX_COMPLETED_LESSON_SHARE = 0.5;
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
@@ -30,7 +33,7 @@ const refundActionSchema = z.object({
   reason: z
     .string()
     .trim()
-    .min(10, "Tell us a little more about why you want to cancel.")
+    .min(10, "Tell us a little more about why you want a refund.")
     .max(1000, "Please keep your reason under 1000 characters."),
 });
 
@@ -89,7 +92,7 @@ function lastDayOfWindow(purchasedAtIso: string): string {
  * The confirmation the learner gets in their inbox. There is no mail
  * transport wired up yet, so the built message goes to the server log.
  */
-function buildReversalEmail(input: {
+function buildRefundEmail(input: {
   learnerName: string;
   learnerEmail: string;
   courseTitle: string;
@@ -97,14 +100,14 @@ function buildReversalEmail(input: {
 }) {
   return {
     to: input.learnerEmail,
-    subject: `Reversal requested — ${input.courseTitle}`,
+    subject: `Refund requested — ${input.courseTitle}`,
     body: [
       `Hi ${input.learnerName},`,
       "",
-      `We have your Reversal request for "${input.courseTitle}".`,
-      `The Reversal is for ${formatPrice(input.amount)}, the amount you paid.`,
+      `We have your refund request for "${input.courseTitle}".`,
+      `The refund is for ${formatPrice(input.amount)}, the amount you paid.`,
       "",
-      "Our team reviews every Reversal by hand. You do not need to do anything else — we will email you again when it is done.",
+      "Our team reviews every refund by hand. You do not need to do anything else — we will email you again when it is done.",
       "",
       "— The Cadence team",
     ].join("\n"),
@@ -115,7 +118,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
-    throw data("You must be logged in to cancel a purchase.", { status: 401 });
+    throw data("You must be logged in to request a refund.", { status: 401 });
   }
 
   const { slug } = parseParams(params, refundParamsSchema);
@@ -158,7 +161,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     .get();
 
   if (claimedSeat) {
-    throw data("A claimed team seat cannot be cancelled.", { status: 403 });
+    throw data("A claimed team seat cannot be refunded.", { status: 403 });
   }
 
   const today = calendarDay(new Date());
@@ -171,6 +174,28 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   const courseLessonIds = getLessonIdsForCourse(course.id);
+
+  if (courseLessonIds.length > 0) {
+    const completed = db
+      .select({ count: sql<number>`count(*)` })
+      .from(lessonProgress)
+      .where(
+        and(
+          eq(lessonProgress.userId, currentUserId),
+          eq(lessonProgress.status, LessonProgressStatus.Completed),
+          inArray(lessonProgress.lessonId, courseLessonIds)
+        )
+      )
+      .get();
+
+    const completedShare = (completed?.count ?? 0) / courseLessonIds.length;
+    if (completedShare >= MAX_COMPLETED_LESSON_SHARE) {
+      throw data(
+        "You have completed too much of this course to get a refund.",
+        { status: 403 }
+      );
+    }
+  }
 
   let watchedSeconds = 0;
   if (courseLessonIds.length > 0) {
@@ -195,7 +220,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   if (watchedSeconds >= MAX_WATCHED_HOURS * 60 * 60) {
-    throw data("You have watched too much of this course to cancel it.", {
+    throw data("You have watched too much of this course to get a refund.", {
       status: 403,
     });
   }
@@ -222,7 +247,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     .returning()
     .get();
 
-  const email = buildReversalEmail({
+  const email = buildRefundEmail({
     learnerName: learner.name,
     learnerEmail: learner.email,
     courseTitle: course.title,
