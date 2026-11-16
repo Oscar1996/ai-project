@@ -41,7 +41,6 @@ function getLessonRef(lessonId: number): SavedLessonRef | null {
 
   if (!course) return null;
 
-  // Returns the row.
   return {
     lessonId: lesson.id,
     lessonTitle: lesson.title,
@@ -52,7 +51,7 @@ function getLessonRef(lessonId: number): SavedLessonRef | null {
 }
 
 function getBookmarksForUser(userId: number) {
-  // Bookmarks come back in the order the lessons sit in the course.
+  // Newest Bookmark first.
   return db
     .select()
     .from(bookmarks)
@@ -62,7 +61,7 @@ function getBookmarksForUser(userId: number) {
 }
 
 function getNotesForUser(userId: number) {
-  // Notes come back in the order the lessons sit in the course.
+  // Most recently edited Note first.
   return db
     .select()
     .from(notes)
